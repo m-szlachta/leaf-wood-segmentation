@@ -1,0 +1,12 @@
+[project]
+name = "gb-seperation"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "laspy>=2.7.0",
+    "networkx>=3.6.1",
+    "open3d>=0.19.0",
+    "scikit-learn>=1.9.0",
+]
