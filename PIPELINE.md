@@ -17,12 +17,11 @@ the TLSeparation graph machinery (Matheus Boni Vicari).
 
 ## 1. High-level overview
 
-The pipeline has two scripts that run in sequence:
+The whole pipeline lives in a **single script**:
 
 | Script | Role |
 |--------|------|
-| `GBSeparation/las_to_pcd.py` | **Pre-processing.** Convert LAS/LAZ → `.pcd` that the main script reads. Shifts coordinates to a local origin to avoid float32 precision loss. |
-| `GBSeparation/GBSeparation.py` | **Main pipeline.** Reads the `.pcd`, runs the full separation, writes a labelled/coloured `.las`. |
+| `GBSeparation/GBSeparation.py` | **Main pipeline.** Reads the `.laz`/`.las` directly with `laspy`, shifts it to a local origin, runs the full separation, and writes a labelled/coloured `.las`. |
 
 The core idea of the algorithm:
 
@@ -35,13 +34,15 @@ The core idea of the algorithm:
 4. **Classify each cluster** by geometric shape — cylindrical or linear clusters
    are wood; blobby clusters are leaves.
 5. **Grow the wood** back out from those confident wood seeds along the paths.
-6. **Label, colour, and export.**
+6. **Post-process** the labels: KNN majority-vote smoothing to remove isolated
+   speckle, then a trunk-fill step to force wood on the bare lower trunk.
+7. **Label, colour, and export.**
 
 ```
-LAS/LAZ ──las_to_pcd──▶ single_tree.pcd
+LAS/LAZ ──read + offset shift (laspy, inline)──▶ points array
                               │
                               ▼
-                     read + root fitting
+                          root fitting
                               │
                               ▼
                    graph construction (kNN)
@@ -56,54 +57,62 @@ LAS/LAZ ──las_to_pcd──▶ single_tree.pcd
              final wood extraction (region growing)
                               │
                               ▼
+      post-processing (KNN label smoothing → trunk fill)
+                              │
+                              ▼
                label → colour → write .las
 ```
 
 ---
 
-## 2. Stage 0 — LAS → PCD conversion (`las_to_pcd.py`)
+## 2. Stage 0 — Read + local-origin shift (inline in `GBSeparation.py`)
 
 ```python
-las = laspy.read(LAS_PATH)
-points = np.vstack((las.x, las.y, las.z)).T
+INPUT_PATH  = 'data/tree_v2.laz'
+OUTPUT_PATH = 'data/segmented_tree_v2.las'
 
+las = laspy.read(INPUT_PATH)
+points = np.vstack((las.x, las.y, las.z)).T
 offset = points.min(axis=0)          # local origin
 points_local = points - offset       # shift so values are small
 
 pcd = o3d.geometry.PointCloud()
 pcd.points = o3d.utility.Vector3dVector(points_local)
-o3d.io.write_point_cloud('data/single_tree.pcd', pcd)
-np.save('data/single_tree_offset.npy', offset)
+pcd = np.asarray(pcd.points)         # (N, 3) numpy array used everywhere below
 ```
 
+The LAS/LAZ file is read **directly** — there is no separate conversion script
+and no `.pcd` intermediate. The cloud is round-tripped through Open3D only to
+obtain a plain `(N, 3)` numpy array.
+
 **Why the offset shift matters.** LAS files are usually in a national grid
-(large coordinates, e.g. ~6,000,000). Open3D stores `.pcd` coordinates as
-**32-bit floats** (~7 significant digits), so writing the raw georeferenced
-values loses sub-metre precision — points appear "rounded". Subtracting a local
-origin keeps values small and preserves full precision. The offset is saved so
-absolute coordinates can be restored later (`points_local + offset`).
+(large coordinates, e.g. ~6,000,000). Working in 32-bit float space loses
+sub-metre precision at those magnitudes, so subtracting a local origin
+(`points.min(axis=0)`) keeps values small and preserves full precision.
+
+> ⚠️ **The offset is *not* saved.** `offset` is computed but never written to
+> disk, and the output `.las` is in the local (shifted) frame. If you need true
+> georeferenced coordinates, persist `offset` yourself and add it back to X/Y/Z
+> (or set the LAS header offset), see Stage 6.
 
 > ⚠️ **Units.** The whole downstream algorithm assumes coordinates are in
-> **metres**. Every distance parameter below is metric. Do not rescale the cloud
-> between this step and the main script.
+> **metres**. Every distance parameter below is metric. Do not rescale the cloud.
 
 **Parameters here:**
 
-| Parameter | Meaning | Tuning |
-|-----------|---------|--------|
-| `LAS_PATH` | input file | — |
-| output `.pcd` path | consumed by `GBSeparation.py` (`INPUT_PATH`) | keep in sync |
+| Parameter | Location | Meaning | Tuning |
+|-----------|----------|---------|--------|
+| `INPUT_PATH` | top of `GBSeparation.py` | input `.laz`/`.las` file | — |
+| `OUTPUT_PATH` | top of `GBSeparation.py` | labelled output `.las` | — |
 
 ---
 
 ## 3. Stage 1 — Read + root-point fitting (`GBSeparation.py`, `LS_circle.py`)
 
 ```python
-pcd = o3d.io.read_point_cloud(INPUT_PATH)
-pcd = np.asarray(pcd.points)
 treeHeight = np.max(pcd[:, 2]) - np.min(pcd[:, 2])
 
-root, fit_seg = getRootPt(pcd, lower_h=0.0, upper_h=0.2)
+root, fit_seg, trunk_radius = getRootPt(pcd, lower_h=0.0, upper_h=0.2)
 pcd = np.append(pcd, root, axis=0)
 root_id = pcd.shape[0] - 1
 ```
@@ -119,11 +128,13 @@ Fits a synthetic **root point** at the trunk base:
 1. Take all points in the height slice `[min_z + lower_h, min_z + upper_h]` — a
    ring of trunk near the ground.
 2. Fit a 2-D circle to their `(x, y)` via least squares (`circleFit`).
-3. Return the circle centre `(x, y)` at height `min_z + lower_h` as the root.
+3. Return the circle centre `(x, y)` at height `min_z + lower_h` as the root, the
+   indices of the trunk-slice points, **and the fitted `trunk_radius`**.
 
 This root becomes a single node all shortest paths converge to. Fitting a circle
 centre (rather than picking a real point) gives a stable, well-centred root even
-if the trunk base is noisy or partially occluded.
+if the trunk base is noisy or partially occluded. The returned `trunk_radius` is
+reused later by the trunk-fill post-processing step (Stage 5.5).
 
 **Supporting functions:**
 - `circleFit(arr)` — closed-form least-squares 2-D circle fit → centre + radius.
@@ -220,11 +231,22 @@ No tunable parameters here — it's a deterministic consequence of the graph.
 ```python
 init_wood_ids = extract_init_wood(pcd, G, root_id, path_dis, path_list,
                                   split_interval=[0.1, 0.2, 0.3, 0.5, 1],
-                                  max_angle=0.25*np.pi)
+                                  max_angle=0.25*np.pi,
+                                  t_linearity=T_LINEARITY, t_error=T_ERROR,
+                                  curve_threshold=CURVE_THRESHOLD)
 ```
 
 This is the heart of the method. It finds **confident wood seed points** by
 cutting the graph into clusters and testing each cluster's *shape*.
+
+> **Note (important fix).** The shape thresholds are now driven by the
+> `T_LINEARITY`, `T_ERROR` and `CURVE_THRESHOLD` constants defined at the top of
+> `GBSeparation.py` and passed all the way through `extract_init_wood` →
+> `components_classify` → `classify_info`. Previously these were **hardcoded**
+> inside `ExtractInitWood.py` (`t_linearity=0.90, t_error=0.5`), which silently
+> overrode the `components_classify` defaults — so editing the thresholds
+> anywhere else had **no effect**. If you tune these values, do it via the
+> constants in `GBSeparation.py`.
 
 ### 6.1 Precursor edge cutting (direction + distance)
 
@@ -270,8 +292,8 @@ Steps inside `classify_info`:
    `±25%` of `split_interval` (rejects clusters that don't match the current
    scale).
 5. **Cylinder test** — fit a 2-D circle to the cross-section
-   (`circleFitError`); if `FitError < t_error` and curvature `> 0.01` → wood
-   (return radius).
+   (`circleFitError`); if `FitError < t_error` and curvature `> curve_threshold`
+   → wood (return radius).
 6. **Linearity test** — if `evals[0]/sum(evals) > t_linearity` → wood (return
    `-linearity`).
 7. Otherwise → `0` (other).
@@ -286,21 +308,21 @@ thicker as they get farther from the trunk).
 
 ### Parameters to tune — **primary precision/recall knobs**
 
-| Parameter | Location | Effect | Tuning |
-|-----------|----------|--------|--------|
-| `t_linearity` | `components_classify` call, line 72 | variance fraction along main axis to call a cluster "linear wood" | **Lower** (0.85) → more branches captured, more leaf contamination. **Higher** (0.95) → cleaner wood, misses fine branches. |
-| `t_error` | `components_classify` call, line 73 | relative cylinder-fit error tolerance | **Higher** → accepts messier cylinders (more recall, more leaf FP). **Lower** → only clean cylinders. |
-| `split_interval` | `extract_init_wood` call, line 47 | list of path-distance scales (metres) | **Add smaller** (e.g. `0.05`) to catch twigs; **add larger** for thick trunks. More scales = better coverage, slower. Must be metric. |
-| `max_angle` | `extract_init_wood` call, line 47 | max path-direction angle before an edge is cut | **Smaller** → aggressive cutting, straighter/finer clusters (may over-fragment curves). **Larger** → keeps curved branches whole (may merge in leaves). |
-| size filter `max(10, N/20000)` | `classify_info`, line 86 | min cluster size | Raise to suppress tiny noisy clusters; lower to keep small twigs. |
-| dimension tolerance `0.25` | `classify_info`, line 114 | how tightly cluster length must match the scale | Widen for more permissive acceptance. |
-| `curve > 0.01` | `classify_info`, line 119 | min curvature to attempt cylinder fit | Rarely needs changing. |
-| correction passes `itera_num < 3` | `components_classify`, line 43 | number of path-based cleanup passes | More = more aggressive demotion of implausible wood. |
+| Parameter | Location | Default | Effect | Tuning |
+|-----------|----------|---------|--------|--------|
+| `T_LINEARITY` | `GBSeparation.py` constant | `0.95` | variance fraction along main axis to call a cluster "linear wood" | **Lower** (0.85) → more branches captured, more leaf contamination. **Higher** (0.95) → cleaner wood, misses fine branches. |
+| `T_ERROR` | `GBSeparation.py` constant | `0.10` | relative cylinder-fit error tolerance | **Higher** → accepts messier cylinders (more recall, more leaf FP). **Lower** → only clean cylinders. *The single biggest precision dial* — the old effective value of `0.5` let almost any leaf blob pass as wood. |
+| `CURVE_THRESHOLD` | `GBSeparation.py` constant | `0.03` | min cross-sectional curvature (thickness) before a cluster can be a cylinder | **Raise** to reject near-flat leaf clusters; **lower** toward `0.01` to allow thinner cylinders. |
+| `split_interval` | `extract_init_wood` call | `[0.1,0.2,0.3,0.5,1]` | list of path-distance scales (metres) | **Add smaller** (e.g. `0.05`) to catch twigs; **add larger** for thick trunks. More scales = better coverage, slower. Must be metric. |
+| `max_angle` | `extract_init_wood` call | `0.25π` | max path-direction angle before an edge is cut | **Smaller** → aggressive cutting, straighter/finer clusters (may over-fragment curves). **Larger** → keeps curved branches whole (may merge in leaves). |
+| size filter `max(10, N/20000)` | `classify_info` | — | min cluster size | Raise to suppress tiny noisy clusters; lower to keep small twigs. |
+| dimension tolerance `0.25` | `classify_info` | `0.25` | how tightly cluster length must match the scale | Widen for more permissive acceptance. |
+| correction passes `itera_num < 3` | `components_classify` | `3` | number of path-based cleanup passes | More = more aggressive demotion of implausible wood. |
 
 **Rule of thumb:**
-- Leaves labelled as wood (false positives)? → **raise `t_linearity`, lower
-  `t_error`**, possibly raise the size filter.
-- Branches lost (false negatives)? → **lower `t_linearity`, raise `t_error`**, add
+- Leaves labelled as wood (false positives)? → **raise `T_LINEARITY`, lower
+  `T_ERROR`, raise `CURVE_THRESHOLD`**, possibly raise the size filter.
+- Branches lost (false negatives)? → **lower `T_LINEARITY`, raise `T_ERROR`**, add
   a smaller `split_interval`.
 
 ### Supporting functions (`Eigen_transform.py`, `Components_classify.py`)
@@ -345,6 +367,69 @@ Turns the confident **wood seeds** into the full wood set in three phases:
 
 ---
 
+## 7.5 Stage 5.5 — Post-processing (`PostProcess.py`)
+
+Two optional cleanup passes run on `final_wood_mask` **after** region growing and
+**before** the wood/leaf split. They target the two failure modes the shape
+classifier leaves behind: scattered mislabelled points, and leaf points sitting on
+the bare lower trunk (physically impossible).
+
+```python
+# 1) KNN majority-vote smoothing (removes isolated speckle in both classes)
+if SMOOTH_K > 0:
+    final_wood_mask = smooth_labels(pcd, final_wood_mask, k=SMOOTH_K, iters=SMOOTH_ITERS)
+
+# 2) Trunk fill (force wood on the bare lower trunk)
+if FILL_TRUNK:
+    final_wood_mask, crown_base_z = fill_trunk(pcd, final_wood_mask, root[0, :2], trunk_radius,
+                                               radius_factor=TRUNK_RADIUS_FACTOR,
+                                               spread_factor=TRUNK_SPREAD_FACTOR)
+```
+
+### 7.5.1 KNN label smoothing (`smooth_labels`)
+
+Computes each point's `k` nearest neighbours once (including itself, so a point
+gets a stabilising vote for its own label), then iterates a **majority vote**
+`iters` times. A wood point surrounded by leaf flips to leaf, and vice-versa. This
+erases isolated wood specks in the crown and isolated leaf specks on the trunk,
+while leaving coherent regions untouched. Because neighbours are static, the kNN
+search runs once and only the vote iterates.
+
+### 7.5.2 Trunk fill (`fill_trunk`)
+
+Uses the fact that the **lower trunk is bare** — anything close to the trunk axis
+below the crown cannot be a leaf:
+
+1. **Detect the crown base.** Scan height slices bottom-up; the crown base is the
+   lowest slice whose 95th-percentile radial spread (distance from the trunk axis)
+   exceeds `spread_factor * trunk_radius`.
+2. **Fill.** Every point **below the crown base** and **within
+   `radius_factor * trunk_radius`** of the axis (the fitted root centre) is forced
+   to wood.
+3. **Safe fallback.** If the crown never "opens" (spread never exceeds the
+   threshold), the crown base defaults to the top of the tree and *nothing* is
+   filled — so this step can only ever help, never eat a whole crown.
+
+The trunk axis is `root[0, :2]` (the fitted root centre from Stage 1) and
+`trunk_radius` is the circle radius returned by `getRootPt`. This assumes a
+roughly **straight, vertical** trunk (the same precondition as Stage 1).
+
+### Parameters to tune
+
+| Parameter | Location | Default | Effect | Tuning |
+|-----------|----------|---------|--------|--------|
+| `SMOOTH_K` | `GBSeparation.py` constant | `10` (0 disables) | neighbours in the majority vote | Higher → smoother, may erode thin real branches; lower → gentler. `0` turns smoothing off. |
+| `SMOOTH_ITERS` | `GBSeparation.py` constant | `2` | number of smoothing passes | More passes = stronger smoothing. |
+| `FILL_TRUNK` | `GBSeparation.py` constant | `True` | enable/disable trunk fill | — |
+| `TRUNK_RADIUS_FACTOR` | `GBSeparation.py` constant | `2.0` | trunk zone width = this × base radius | **Raise** if leaf still clings to the trunk; **lower** if the fill grabs low branches/crown. |
+| `TRUNK_SPREAD_FACTOR` | `GBSeparation.py` constant | `3.0` | crown base = where radial spread exceeds this × base radius | **Raise** → crown base detected higher (fills more trunk). **Lower** (→2) → crown base lower (fills less). |
+| `slice_height`, `min_slice_pts` | `fill_trunk` signature | `0.5`, `5` | crown-base scan resolution | Rarely need changing; shrink `slice_height` for very short trees. |
+
+> The script prints the detected `trunk_radius` and `crown_base height` each run —
+> use them to sanity-check that crown-base detection is sensible for your tree.
+
+---
+
 ## 8. Stage 6 — Labelling, colouring, export (`GBSeparation.py`)
 
 ```python
@@ -368,9 +453,9 @@ new_las.write('data/segmented_tree.las')
 - **Classification codes:** `0 = wood`, `1 = leaf` (see `WOOD_LABEL` / `LEAF_LABEL`).
 
 > 💡 The output `.las` is written in the **local (offset-shifted)** coordinate
-> frame from Stage 0. To restore true georeferenced coordinates, add the saved
-> `single_tree_offset.npy` back to X/Y/Z, or set the LAS header offset/scale
-> accordingly.
+> frame from Stage 0. The `offset` is not persisted by the script, so to restore
+> true georeferenced coordinates you must save `offset` yourself and add it back
+> to X/Y/Z (or set the LAS header offset/scale accordingly).
 
 **Parameters to tune:** colours (`rgb8` values), class codes, LAS
 `point_format`/`version` — cosmetic/format only, no effect on segmentation.
@@ -441,31 +526,39 @@ near `1e-5` unless your clouds were resampled.
    apart.
 6. **Completeness of wood.** `max_iter` and the smoothing factor in
    `extract_final_wood` recover missed wood.
-7. **Measure** with `evaluate_indicators` (if you have references) and **look**
+7. **Post-processing.** `SMOOTH_K`/`SMOOTH_ITERS` clean isolated speckle;
+   `TRUNK_RADIUS_FACTOR`/`TRUNK_SPREAD_FACTOR` clear leaf off the bare trunk.
+8. **Measure** with `evaluate_indicators` (if you have references) and **look**
    with the visualization helpers at every step.
 
 ---
 
 ## 12. Parameter reference table (all in one place)
 
-| Parameter | File / line | Default | Stage |
-|-----------|-------------|---------|-------|
-| `offset` (local origin) | `las_to_pcd.py:16` | `points.min(axis=0)` | 0 |
-| `lower_h`, `upper_h` | `GBSeparation.py:22` | `0.0`, `0.2` | 1 |
-| `knn` | `GBSeparation.py:30` | `300` | 2 |
-| `kpairs` | `GBSeparation.py:30` | `3` | 2 |
-| `nbrs_threshold` | `GBSeparation.py:30` | `treeHeight/30` | 2 |
-| `nbrs_threshold_step` | `GBSeparation.py:30` | `treeHeight/60` | 2 |
-| `graph_threshold` | `Graph_Path.py:32` | `inf` | 2 |
-| `split_interval` | `GBSeparation.py:47` | `[0.1,0.2,0.3,0.5,1]` | 4 |
-| `max_angle` | `GBSeparation.py:47` | `0.25π` | 4 |
-| `t_linearity` | `GBSeparation.py:72` | `0.9` | 4 |
-| `t_error` | `GBSeparation.py:73` | `0.2` | 4 |
-| size filter | `Components_classify.py:86` | `max(10, N/20000)` | 4 |
-| dimension tolerance | `Components_classify.py:114` | `0.25` | 4 |
-| curvature floor | `Components_classify.py:119` | `0.01` | 4 |
-| correction passes | `Components_classify.py:43` | `3` | 4 |
-| `max_iter` | `ExtractFinalWood.py:3` | `100` | 5 |
-| smoothing factor | `ExtractFinalWood.py:74` | `2×` | 5 |
-| colours / class codes | `GBSeparation.py:59-83` | brown/green, 0/1 | 6 |
-| matching `tolerance` | `Accuracy_evaluation.py:4` | `1e-5` | eval |
+| Parameter | File / location | Default | Stage |
+|-----------|-----------------|---------|-------|
+| `offset` (local origin) | `GBSeparation.py` (inline) | `points.min(axis=0)` | 0 |
+| `INPUT_PATH`, `OUTPUT_PATH` | `GBSeparation.py` constants | — | 0 |
+| `lower_h`, `upper_h` | `getRootPt` call | `0.0`, `0.2` | 1 |
+| `knn` | `array_to_graph` call | `300` | 2 |
+| `kpairs` | `array_to_graph` call | `3` | 2 |
+| `nbrs_threshold` | `array_to_graph` call | `treeHeight/30` | 2 |
+| `nbrs_threshold_step` | `array_to_graph` call | `treeHeight/60` | 2 |
+| `graph_threshold` | `Graph_Path.py` | `inf` | 2 |
+| `split_interval` | `extract_init_wood` call | `[0.1,0.2,0.3,0.5,1]` | 4 |
+| `max_angle` | `extract_init_wood` call | `0.25π` | 4 |
+| `T_LINEARITY` | `GBSeparation.py` constant | `0.95` | 4 |
+| `T_ERROR` | `GBSeparation.py` constant | `0.10` | 4 |
+| `CURVE_THRESHOLD` | `GBSeparation.py` constant | `0.03` | 4 |
+| size filter | `Components_classify.py` | `max(10, N/20000)` | 4 |
+| dimension tolerance | `Components_classify.py` | `0.25` | 4 |
+| correction passes | `Components_classify.py` | `3` | 4 |
+| `max_iter` | `ExtractFinalWood.py` | `100` | 5 |
+| smoothing factor | `ExtractFinalWood.py` | `2×` | 5 |
+| `SMOOTH_K` | `GBSeparation.py` constant | `10` (0 disables) | 5.5 |
+| `SMOOTH_ITERS` | `GBSeparation.py` constant | `2` | 5.5 |
+| `FILL_TRUNK` | `GBSeparation.py` constant | `True` | 5.5 |
+| `TRUNK_RADIUS_FACTOR` | `GBSeparation.py` constant | `2.0` | 5.5 |
+| `TRUNK_SPREAD_FACTOR` | `GBSeparation.py` constant | `3.0` | 5.5 |
+| colours / class codes | `GBSeparation.py` | brown/green, 0/1 | 6 |
+| matching `tolerance` | `Accuracy_evaluation.py` | `1e-5` | eval |

@@ -78,6 +78,8 @@ def getRootPt(arr, lower_h=0.00, upper_h=0.05):
         1x3 2d-array of root point.
     trunk segment points : array
         index of extracted trunk segment points.
+    trunk radius : float
+        radius of the 2D circle fitted to the trunk base slice.
     """
     min_z = np.min(arr[:, 2])
 
@@ -89,7 +91,7 @@ def getRootPt(arr, lower_h=0.00, upper_h=0.05):
     # fit a 2D-circle based on the trunk segment points, only x, y coordinates are used.
     x, y, r = circleFit(arr[arr_sage])
 
-    return np.array([[x, y, min_z+lower_h]]), np.array(arr_sage)
+    return np.array([[x, y, min_z+lower_h]]), np.array(arr_sage), r
 
 def circleFitError(arr):
     """

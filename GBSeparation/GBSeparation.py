@@ -6,6 +6,7 @@ from Graph_Path import array_to_graph, extract_path_info
 from LS_circle import getRootPt
 from ExtractInitWood import extract_init_wood
 from ExtractFinalWood import extract_final_wood
+from PostProcess import smooth_labels, fill_trunk
 from Accuracy_evaluation import evaluate_indicators
 from Visualization import show_graph, sp_graph, show_pcd
 import laspy
@@ -14,8 +15,8 @@ import os
 os.environ.pop("WAYLAND_DISPLAY", None)   # force GLFW onto X11/XWayland
 os.environ["XDG_SESSION_TYPE"] = "x11"
 
-INPUT_PATH = 'data/tree_v1.laz'
-OUTPUT_PATH = 'data/segmented_tree_v1.las'
+INPUT_PATH = 'data/tree_v2.laz'
+OUTPUT_PATH = 'data/segmented_tree_v2.las'
 
 # --- Wood-cluster classification thresholds (tune these) ---
 # A cluster is classified as "cylinder wood" if its 2D circle-fit relative RMS error
@@ -25,6 +26,15 @@ OUTPUT_PATH = 'data/segmented_tree_v1.las'
 T_LINEARITY = 0.95      # linear-shape threshold (was effectively 0.90)
 T_ERROR = 0.10          # cylinder-fit relative error threshold (was effectively 0.50)
 CURVE_THRESHOLD = 0.03  # minimum cross-sectional curvature for a cylinder (was 0.01)
+
+# --- Final KNN label-smoothing (removes isolated wood/leaf speckle) ---
+SMOOTH_K = 0      # neighbours used in the majority vote (0 disables smoothing)
+SMOOTH_ITERS = 2    # number of smoothing passes
+
+# --- Trunk fill (force wood on the bare lower trunk) ---
+FILL_TRUNK = True           # force near-axis points below the crown base to wood
+TRUNK_RADIUS_FACTOR = 2.0   # trunk zone = this multiple of the fitted base radius
+TRUNK_SPREAD_FACTOR = 3.0   # crown base = where radial spread exceeds this x base radius
 
 las = laspy.read(INPUT_PATH)
 points = np.vstack((las.x, las.y, las.z)).T
@@ -40,7 +50,7 @@ pcd = np.asarray(pcd.points)
 treeHeight = np.max(pcd[:, 2])-np.min(pcd[:, 2])
 
 # fit the root point.
-root, fit_seg = getRootPt(pcd, lower_h=0.0, upper_h=0.2)
+root, fit_seg, trunk_radius = getRootPt(pcd, lower_h=0.0, upper_h=0.2)
 pcd = np.append(pcd, root, axis=0)
 root_id = pcd.shape[0]-1
 print("root_ID:", root_id)
@@ -72,6 +82,20 @@ init_wood_ids = extract_init_wood(pcd, G, root_id, path_dis, path_list,
 # extract final wood points.
 print(str(datetime.datetime.now()) + ' | >>>extracting final wood points...')
 final_wood_mask = extract_final_wood(pcd, root_id, path_dis, path_list, init_wood_ids, G)
+
+# smooth the labels to remove isolated wood-in-crown / leaf-on-trunk speckle.
+if SMOOTH_K > 0:
+    print(str(datetime.datetime.now()) + ' | >>>smoothing labels (KNN majority vote)...')
+    final_wood_mask = smooth_labels(pcd, final_wood_mask, k=SMOOTH_K, iters=SMOOTH_ITERS)
+
+# force wood on the bare lower trunk (removes physically-impossible leaf-on-trunk).
+if FILL_TRUNK:
+    print(str(datetime.datetime.now()) + ' | >>>filling bare trunk...')
+    final_wood_mask, crown_base_z = fill_trunk(pcd, final_wood_mask, root[0, :2], trunk_radius,
+                                               radius_factor=TRUNK_RADIUS_FACTOR,
+                                               spread_factor=TRUNK_SPREAD_FACTOR)
+    print("   trunk_radius:", round(float(trunk_radius), 3),
+          "| crown_base height:", round(float(crown_base_z - pcd[:, 2].min()), 3))
 
 # remove the inserted root point and extract wood/leaf points by mask index.
 final_wood_mask[-1] = False
