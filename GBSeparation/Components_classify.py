@@ -3,7 +3,8 @@ import numpy as np
 from Eigen_transform import svd_eigen, pca_transform
 from LS_circle import circleFitError
 
-def components_classify(pcd, components, path_list, t_linearity=0.92, t_error=0.2, split_interval=0.2):
+def components_classify(pcd, components, path_list, t_linearity=0.95, t_error=0.1, split_interval=0.2,
+                        curve_threshold=0.01):
     """
     Classify the components as wood clusters with salient cylindrical/linear characteristic and
     others, follow a path-based correction script.
@@ -34,7 +35,7 @@ def components_classify(pcd, components, path_list, t_linearity=0.92, t_error=0.
     components_idx = np.zeros(pcd.shape[0], dtype=int)
     for i, (component) in enumerate(components):
         component = list(component)
-        c = classify_info(pcd, component, path_list, t_linearity, t_error, split_interval)
+        c = classify_info(pcd, component, path_list, t_linearity, t_error, split_interval, curve_threshold)
         classify_components.append([c, component])
         for elm in component:
             components_idx[elm] = i
@@ -56,7 +57,7 @@ def components_classify(pcd, components, path_list, t_linearity=0.92, t_error=0.
         itera_num += 1
     return classify_components
 
-def classify_info(pcd, component, path_list, t_linearity, t_error, split_interval):
+def classify_info(pcd, component, path_list, t_linearity, t_error, split_interval, curve_threshold=0.01):
     """
     Get the classification information of a point cluster.
 
@@ -116,7 +117,7 @@ def classify_info(pcd, component, path_list, t_linearity, t_error, split_interva
 
     curve = evals[2] / evals.sum()
     FitError, r = circleFitError(points_transformed[:, 1:])
-    if(FitError<t_error and curve > 0.01):
+    if(FitError<t_error and curve > curve_threshold):
         return r
     linearity = evals[0]/evals.sum()
     if(linearity>t_linearity):
@@ -125,8 +126,13 @@ def classify_info(pcd, component, path_list, t_linearity, t_error, split_interva
 
 # calculate the angular distance between the approximate axial and the eigenvector.
 def getAngle3D(v1, v2):
-    v1 /= math.sqrt(v1[0]*v1[0]+v1[1]*v1[1]+v1[2]*v1[2])
-    v2 /= math.sqrt(v2[0]*v2[0]+v2[1]*v2[1]+v2[2]*v2[2])
+    n1 = math.sqrt(v1[0]*v1[0]+v1[1]*v1[1]+v1[2]*v1[2])
+    n2 = math.sqrt(v2[0]*v2[0]+v2[1]*v2[1]+v2[2]*v2[2])
+    # degenerate (zero-length) vector has no defined direction; treat as worst alignment
+    if(n1==0 or n2==0):
+        return math.pi / 2
+    v1 = v1 / n1
+    v2 = v2 / n2
     rad = (v1[0]*v2[0]+v1[1]*v2[1]+v1[2]*v2[2])
     if(rad<-1):
         rad = -1

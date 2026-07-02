@@ -6,7 +6,7 @@ import networkx as nx
 from Visualization import graph_cluster, graph_cluster2, show_clusters
 
 def extract_init_wood(pcd, G, base_id, path_dis, path_list, split_interval=[0.1,0.2,0.3,0.5,1],
-                     max_angle=np.pi):
+                     max_angle=np.pi, t_linearity=0.90, t_error=0.5, curve_threshold=0.01):
     """
     Clustering by cut the edges of graph G based on shortest path length and single edge length.
 
@@ -69,8 +69,9 @@ def extract_init_wood(pcd, G, base_id, path_dis, path_list, split_interval=[0.1,
         # show_clusters(clusters)
 
         # recognition of wood clusters with linear/cylindrical shape in a individual scale.
-        classify_components = components_classify(pcd, components, path_list, t_linearity=0.90,
-                                                  t_error=0.5, split_interval=split_interval[i])
+        classify_components = components_classify(pcd, components, path_list, t_linearity=t_linearity,
+                                                  t_error=t_error, split_interval=split_interval[i],
+                                                  curve_threshold=curve_threshold)
         for classify_component in classify_components:
             if (classify_component[0] != 0):
                 for elm in classify_component[1]:

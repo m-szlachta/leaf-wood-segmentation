@@ -187,7 +187,7 @@ def array_to_graph(arr, base_id, kpairs=3, knn=300, nbrs_threshold=0.1,
         # Generating list of remaining proints to process.
         unprocessed_idx = idx_base[np.isin(idx_base, processed_idx, invert=True)]
 
-        print("unprocessed_count:", unprocessed_idx.shape[0])
+        #print("unprocessed_count:", unprocessed_idx.shape[0])
 
     return G
 
