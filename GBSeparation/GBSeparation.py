@@ -15,25 +15,25 @@ import os
 os.environ.pop("WAYLAND_DISPLAY", None)   # force GLFW onto X11/XWayland
 os.environ["XDG_SESSION_TYPE"] = "x11"
 
-INPUT_PATH = 'data/tree_v2.laz'
-OUTPUT_PATH = 'data/segmented_tree_v2.las'
+INPUT_PATH = 'dataverse_files/AcePse_SP02_04_2019-08-23_q2_TLS-on_c.laz'
+OUTPUT_PATH = 'data/segmented_tree_v3.las'
 
 # --- Wood-cluster classification thresholds (tune these) ---
 # A cluster is classified as "cylinder wood" if its 2D circle-fit relative RMS error
 # is below T_ERROR and its curvature (thickness) exceeds CURVE_THRESHOLD; otherwise it
 # is "linear wood" if its linearity exceeds T_LINEARITY. Lower T_ERROR / higher
 # CURVE_THRESHOLD = stricter = less leaf mislabelled as wood.
-T_LINEARITY = 0.95      # linear-shape threshold (was effectively 0.90)
-T_ERROR = 0.10          # cylinder-fit relative error threshold (was effectively 0.50)
-CURVE_THRESHOLD = 0.03  # minimum cross-sectional curvature for a cylinder (was 0.01)
+T_LINEARITY = 0.90      # linear-shape threshold
+T_ERROR = 0.10          # cylinder-fit relative error threshold
+CURVE_THRESHOLD = 0.02  # minimum cross-sectional curvature for a cylinder
 
 # --- Final KNN label-smoothing (removes isolated wood/leaf speckle) ---
-SMOOTH_K = 0      # neighbours used in the majority vote (0 disables smoothing)
-SMOOTH_ITERS = 2    # number of smoothing passes
+SMOOTH_K = 9      # neighbours used in the majority vote (0 disables smoothing)
+SMOOTH_ITERS = 1    # number of smoothing passes
 
 # --- Trunk fill (force wood on the bare lower trunk) ---
 FILL_TRUNK = True           # force near-axis points below the crown base to wood
-TRUNK_RADIUS_FACTOR = 2.0   # trunk zone = this multiple of the fitted base radius
+TRUNK_RADIUS_FACTOR = 3.0   # trunk zone = this multiple of the fitted base radius
 TRUNK_SPREAD_FACTOR = 3.0   # crown base = where radial spread exceeds this x base radius
 
 las = laspy.read(INPUT_PATH)

@@ -1,0 +1,15 @@
+T_LINEARITY = 0.90      # linear-shape threshold
+T_ERROR = 0.10          # cylinder-fit relative error threshold
+CURVE_THRESHOLD = 0.02  # minimum cross-sectional curvature for a cylinder
+
+# --- Final KNN label-smoothing (removes isolated wood/leaf speckle) ---
+SMOOTH_K = 0      # neighbours used in the majority vote (0 disables smoothing)
+SMOOTH_ITERS = 2    # number of smoothing passes
+
+# --- Trunk fill (force wood on the bare lower trunk) ---
+FILL_TRUNK = True           # force near-axis points below the crown base to wood
+TRUNK_RADIUS_FACTOR = 3.0   # trunk zone = this multiple of the fitted base radius
+TRUNK_SPREAD_FACTOR = 3.0 
+
+
+good params before adding the KNN. trunk 
