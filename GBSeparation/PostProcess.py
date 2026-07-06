@@ -44,7 +44,8 @@ def smooth_labels(points, wood_mask, k=10, iters=2):
 
 
 def fill_trunk(points, wood_mask, axis_xy, trunk_radius, radius_factor=2.0,
-               spread_factor=3.0, slice_height=0.5, min_slice_pts=5):
+               spread_factor=3.0, slice_height=0.5, min_slice_pts=5,
+               crown_persist=3, spread_floor=0.5):
     """
     Force wood for points near the vertical trunk axis below the crown base.
 
@@ -73,6 +74,14 @@ def fill_trunk(points, wood_mask, axis_xy, trunk_radius, radius_factor=2.0,
         as `points`.
     min_slice_pts : int
         Slices with fewer points than this are skipped when locating the crown base.
+    crown_persist : int
+        Number of *consecutive* slices whose spread must exceed the threshold before
+        the crown base is accepted. Guards against a single noisy slice on a sparse
+        trunk tripping the detector far below the real crown.
+    spread_floor : float
+        Absolute floor (in the units of `points`) on the spread threshold, applied as
+        max(spread_factor * trunk_radius, spread_floor). Keeps the threshold above the
+        bare trunk's own radial scatter when the fitted trunk_radius is very small.
 
     Returns
     -------
@@ -90,19 +99,32 @@ def fill_trunk(points, wood_mask, axis_xy, trunk_radius, radius_factor=2.0,
     horiz = np.linalg.norm(points[:, :2] - axis_xy, axis=1)
 
     # Locate the crown base: scan slices bottom-up, stop where the radial spread
-    # opens out well beyond the trunk. Fallback = z_max (fill nothing) if it never
-    # opens, so the step can only ever help, never over-fill a whole crown.
+    # opens out well beyond the trunk. Require `crown_persist` consecutive slices
+    # over the threshold so a lone noisy slice on a sparse trunk cannot pull the
+    # crown base far below the real crown; the threshold is also floored so it stays
+    # above the trunk's own scatter when trunk_radius is tiny. Fallback = z_max (fill
+    # nothing) if it never opens, so the step can only ever help, never over-fill.
+    spread_thresh = max(spread_factor * trunk_radius, spread_floor)
     crown_base_z = z_max
     n_slices = int(np.ceil((z_max - z_min) / slice_height))
+    run_len = 0
+    run_start = z_max
     for s in range(n_slices):
         lo = z_min + s * slice_height
         in_slice = (z >= lo) & (z < lo + slice_height)
         if in_slice.sum() < min_slice_pts:
+            run_len = 0
             continue
         spread = np.percentile(horiz[in_slice], 95)
-        if spread > spread_factor * trunk_radius:
-            crown_base_z = lo
-            break
+        if spread > spread_thresh:
+            if run_len == 0:
+                run_start = lo
+            run_len += 1
+            if run_len >= crown_persist:
+                crown_base_z = run_start
+                break
+        else:
+            run_len = 0
 
     trunk_zone = (z < crown_base_z) & (horiz < radius_factor * trunk_radius)
     mask[trunk_zone] = True

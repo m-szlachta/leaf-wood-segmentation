@@ -26,7 +26,7 @@ def extract_init_wood(pcd, G, base_id, path_dis, path_list, split_interval=[0.1,
     """
 
     # precursor distance/direction-based segmentation.
-    print("cut edges...")
+
     remove_edge_list = []
     for (u, v, d) in G.edges(data=True):
         if (u == base_id or v == base_id):
@@ -57,13 +57,11 @@ def extract_init_wood(pcd, G, base_id, path_dis, path_list, split_interval=[0.1,
 
     init_wood_ids = []
     for i, (interval_dict) in enumerate(interval_dicts):
-        print("interval:", split_interval[i])
         components = []
         for key, value in interval_dict.items():
             sub_G = G.subgraph(value)
             for component in nx.connected_components(sub_G):
                 components.append(component)
-        print("components:", len(components))
 
         # clusters = graph_cluster2(pcd, components)
         # show_clusters(clusters)

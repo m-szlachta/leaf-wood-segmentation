@@ -46,10 +46,14 @@ class WL_Segmentation():
         pcd = np.asarray(pcd.points)
         return pcd
 
-    def segmentation(self, pcd: np.ndarray, t_linearity: float = 0.9, t_error: float = 0.1, curvy_treshold: float = 0.02) -> np.ndarray:
+    def segmentation(self, pcd: np.ndarray, t_linearity: float = 0.9, t_error: float = 0.1, curvy_treshold: float = 0.02, max_trunk_radius: float = 0.5) -> np.ndarray:
         treeHeight = np.max(pcd[:, 2])-np.min(pcd[:, 2])
 
         self.root, fit_seg, self.trunk_radius = getRootPt(pcd, lower_h=0.0, upper_h=0.2)
+        
+        if self.trunk_radius > max_trunk_radius:
+            print(f"trunk_radius {self.trunk_radius:.3f} m implausible, clamping to {max_trunk_radius} m")
+            self.trunk_radius = max_trunk_radius
         pcd = np.append(pcd, self.root, axis=0)
         root_id = pcd.shape[0]-1
 
@@ -66,7 +70,17 @@ class WL_Segmentation():
         
         return final_wood_mask
     
-    def post_processing(self, pcd: np.ndarray, final_wood_mask: np.ndarray, smooth_k: int = 9, smooth_iters: int = 1, fill_trunk_flag: bool = True, trunk_radius_factor: float = 3.0, trunk_spread_factor: float = 3.0) -> tuple[np.ndarray, np.ndarray]:
+    def post_processing(
+            self,
+            pcd: np.ndarray,
+            final_wood_mask: np.ndarray,
+            smooth_k: int = 9,
+            smooth_iters: int = 1,
+            fill_trunk_flag: bool = True,
+            trunk_radius_factor: float = 3.0,
+            trunk_spread_factor: float = 3.0,
+        ) -> tuple[np.ndarray, np.ndarray]:
+        
         if smooth_k > 0:
             final_wood_mask = smooth_labels(pcd, final_wood_mask, k=smooth_k, iters=smooth_iters)
 
@@ -106,17 +120,37 @@ class WL_Segmentation():
 
         new_las.write(output_path)
 
-    def run_segmentation_pipeline(self, input_path: str, output_path: str, t_linearity: float = 0.85, t_error: float = 0.1, curvy_treshold: float = 0.02, smooth_k: int = 19, smooth_iters: int = 1, fill_trunk: bool = False, trunk_radius_factor:float = 3.0, trunk_spread_factor: float = 3.0):
-        paths = self.get_paths(input_path)
-        print(paths)
-        for path in paths:
-            print(f"starting segmentation {path}")
-            pcd = self._las_to_pcd(path)
-            final_wood_mask = self.segmentation(pcd, t_linearity, t_error, curvy_treshold)
-            final_pcd, labels = self.post_processing(pcd, final_wood_mask, smooth_k, smooth_iters, fill_trunk, trunk_radius_factor, trunk_spread_factor)
-            final_path = os.path.join(output_path, os.path.basename(path))
-            self.save_to_las(final_pcd, labels, final_path)
+    def run_segmentation_pipeline(
+            self,
+            input_path: str,
+            output_path: str,
+            t_linearity: float = 0.85,
+            t_error: float = 0.1,
+            curvy_treshold: float = 0.02,
+            smooth_k: int = 13,
+            smooth_iters: int = 2,
+            fill_trunk: bool = True,
+            trunk_radius_factor: float = 2.5,
+            trunk_spread_factor: float = 3.0,
+        ):
+            paths = self.get_paths(input_path)
+
+            for path in paths:
+                print(f"starting segmentation {path}")
+                pcd = self._las_to_pcd(path)
+                final_wood_mask = self.segmentation(pcd, t_linearity, t_error, curvy_treshold)
+                final_pcd, labels = self.post_processing(
+                    pcd,
+                    final_wood_mask,
+                    smooth_k,
+                    smooth_iters,
+                    fill_trunk,
+                    trunk_radius_factor,
+                    trunk_spread_factor,
+                )
+                final_path = os.path.join(output_path, os.path.basename(path))
+                self.save_to_las(final_pcd, labels, final_path)
 
 if __name__ == "__main__":
     seg = WL_Segmentation()
-    seg.run_segmentation_pipeline(input_path='data/instance_seg_forest/class #395.las', output_path='data/wyniki')
+    seg.run_segmentation_pipeline(input_path='data/instance_seg_forest', output_path='data/wyniki')
